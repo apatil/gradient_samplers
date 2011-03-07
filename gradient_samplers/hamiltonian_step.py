@@ -171,6 +171,7 @@ class HMCStep(multistep.MultiStep, pm.Metropolis):
             return p - (step_size) * (-self.gradients_vector)
         else:
             return p
+    
     def propose(self):
         self.record_starting_value()
 
@@ -204,6 +205,8 @@ class HMCStep(multistep.MultiStep, pm.Metropolis):
             try:
                 self.logp_plus_loglike
             except pm.ZeroProbability:
+                from IPython.Debugger import Pdb
+                Pdb(color_scheme='Linux').set_trace()   
                 print 'Encountered illegal state while simulating, returning early.'
                 return
             
