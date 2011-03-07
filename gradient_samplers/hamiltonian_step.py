@@ -11,7 +11,7 @@ import approx_hess as ah
 
 __all__ = ['HMCStep']
 
-class HMCStep(MultiStep):
+class HMCStep(MultiStep, pm.Metropolis):
     """
     Hamiltonian/Hybrid Monte-Carlo (HMC) step method. Works well on continuous variables for which
     the gradient of the log posterior can be calculated.
@@ -69,8 +69,8 @@ class HMCStep(MultiStep):
             fm.find_mode(self)
 
         if covariance is None:
-            self.inv_covariance = ah.approx_hess(self)
-            self.covariance = np.linalg.inv(self.inv_covariance) 
+            # I'd prefer to leave the Hessian bit up to the user.
+            self.inv_covariance = self.covariance = np.eye(len(self.dimensions))
         else :
             self.covariance = covariance
             self.inv_covariance = np.linalg.inv(covariance)
@@ -86,14 +86,16 @@ class HMCStep(MultiStep):
         self.zero = np.zeros(self.dimensions)
         
     
-    acceptr = 0.
+        self.acceptr = 0.
     
-    def step(self):
+    reject = revert
+    
+    def propose(self):
+        self.record_starting_value_and_logp()
+
         #randomize step size
         step_size = np.random.uniform(self.step_size_min, self.step_size_max)
         step_count = int(np.floor(self.trajectory_length / step_size))
-        
-        start_logp = self.logp_plus_loglike
         
         # momentum scale proportional to inverse of parameter scale (basically sqrt(covariance))
         p = np.random.multivariate_normal(mean = self.zero ,cov = self.inv_covariance) 
@@ -113,21 +115,10 @@ class HMCStep(MultiStep):
         
         p = -p 
             
-        try: 
-            log_metrop_ratio = (-start_logp) - (-self.logp_plus_loglike) + self.kenergy(start_p) - self.kenergy(p)
-            
-            self.acceptr = np.minimum(np.exp(log_metrop_ratio), 1.)
-            
-            
-            if (np.isfinite(log_metrop_ratio) and 
-                np.log(np.random.uniform()) < log_metrop_ratio):
-                
-                self.accept()
-            else: 
-                self.reject() 
-                
-        except pm.ZeroProbability:
-            self.reject()     
+        self._hastings_factor = self.kenergy(start_p) - self.kenergy(p)
+        
+    def hastings_factor(self):
+        return self._hastings_factor
     
     def kenergy (self, x):
         return .5 * np.dot(x,np.dot(self.covariance, x))

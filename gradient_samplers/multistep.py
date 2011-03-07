@@ -36,7 +36,7 @@ class MultiStep(pm.StepMethod):
     def __init__(self, stochastics, verbose = 0, tally = True):
         pm.StepMethod.__init__(self, stochastics,verbose, tally=tally)
                 
-        self.slices, self.dimensions = vectorize_stochastics(stochastics)
+        self.slices, self.dimensions = vectorize_stochastics(stochastics)      
       
     @property 
     def vector(self):
@@ -56,33 +56,26 @@ class MultiStep(pm.StepMethod):
             grad_logp[self.slices[str(stochastic)]] = np.ravel(logp_gradient)  
 
         return grad_logp
-         
-    def revert (self):
+    
+    def record_starting_value_and_logp(self):
+        self.starting_value = {}
         for stochastic in self.stochastics:
-            stochastic.revert()
-    
-    def accept(self):
-        self.under_consideration = False
+            self.starting_value[stochastic] = stochastic.value
+        self.startig_logp_plus_loglike = self.logp_plus_loglike
+         
+    def revert(self):
+        for stochastic in self.stochastics:
+            stochastic.value = self.starting_value[stochastic]
         
-    def reject(self):
-        self.revert()
-        self.under_consideration = False
-    
-    under_consideration = False
     
     def consider(self, vector):
-        if self.under_consideration:
-            self.revert()
-            
         for stochastic in self.stochastics:
             proposal_value = vector[self.slices[str(stochastic)]]
             
             if np.size(proposal_value) > 1:
                 proposal_value = np.reshape(proposal_value,  np.shape(stochastic.value))
             
-            stochastic.value = proposal_value   
-        
-        self.under_consideration = True
+            stochastic.value = proposal_value
         
 def vectorize_stochastics(stochastics):
     """Compute the dimension of the sampling space and identify the slices
