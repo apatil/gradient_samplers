@@ -5,13 +5,13 @@ Created on Feb 13, 2011
 '''
 import numpy as np
 import pymc as pm
-from multistep import MultiStep
+import multistep
 import find_mode as fm
 import approx_hess as ah
 
-__all__ = ['HMCStep']
+__all__ = ['HMCStep','GPParentHMCStep']
 
-class HMCStep(MultiStep, pm.Metropolis):
+class HMCStep(multistep.MultiStep, pm.Metropolis):
     """
     Hamiltonian/Hybrid Monte-Carlo (HMC) step method. Works well on continuous variables for which
     the gradient of the log posterior can be calculated.
@@ -58,26 +58,37 @@ class HMCStep(MultiStep, pm.Metropolis):
     """
     
     optimal_acceptance = .651 #Beskos 2010
+    _tuning_info = ['acceptr']
     
-    def __init__(self, stochastics, step_size_scaling = .25, trajectory_length = 2., find_mode = True, verbose = 0, tally = True, masses = None):
-        MultiStep.__init__(self, stochastics, verbose, tally)
+    def __init__(self, stochastics, step_size_scaling = .25, trajectory_length = 2., verbose = 0, tally = True, masses = None):
+        multistep.MultiStep.__init__(self, stochastics, verbose, tally)
         
-        self._tuning_info = ['acceptr']
+        
         self._id = 'HMC'
-        
-        if find_mode:
-            fm.find_mode(self)
-            
+        self.proposal_distribution='None'
+                    
         self.gaussian_stochastics = filter(lambda x: isinstance(x,pm.MvNormalChol), self.stochastics)
-        self.gaussian_slices, self.gaussian_dimensions = vectorize_stochastics(self.gaussian_stochastics)
+        _, self.gaussian_dimensions = multistep.vectorize_stochastics(self.gaussian_stochastics)
         self.nongaussian_stochastics = list(set(self.stochastics) - set(self.gaussian_stochastics))
-        self.nongaussian_markov_blanket = set(self.gaussian_stochastics) | self.children
-        self.nongaussian_slices, self.nongaussian_dimensons = vectorize_stochastics(self.nongaussian_stochastics)
+        _, self.nongaussian_dimensions = multistep.vectorize_stochastics(self.nongaussian_stochastics)
+        self.slices, self.dimensions = multistep.vectorize_stochastics(self.stochastics)
+        
+        wg = []
+        wng = []
+        for s in self.stochastics:
+            slice = self.slices[s.__name__]
+            index_range = range(slice.start, slice.stop)
+            if s in self.gaussian_stochastics:
+                wg += index_range
+            else:
+                wng += index_range
+        self.where_gaussian = (np.array(wg,dtype='int'),)
+        self.where_nongaussian = (np.array(wng,dtype='int'),)
         
         # These can be updated by adaptation if desired.
-        self.nongaussian_covariance = np.diag(1./masses) if masses is not None else np.eye(self.nongaussian_dimensions)
-        self.nongaussian_cholesky_l = np.linalg.cholesky(self.nongaussian_covariance).copy('F')
-        self.nongaussian_cholesky_u = self.nongaussian_cholesky_l.T.copy('F')
+        if self.nongaussian_dimensions>0:
+            self.nongaussian_covariance = np.diag(1./masses) if masses is not None else np.eye(self.nongaussian_dimensions)
+            self.nongaussian_cholesky = np.linalg.cholesky(self.nongaussian_covariance).copy('F')
 
         step_size = step_size_scaling * self.dimensions**(1/4.)
         
@@ -91,13 +102,15 @@ class HMCStep(MultiStep, pm.Metropolis):
         
         self.acceptr = 0.
     
-    reject = revert
+    reject = multistep.MultiStep.revert
 
     @property
     def nongaussian_logp_gradient(self):
         # The gradient of the logp, not including the Gaussian stochastics handled by self.
         # Reason: Those stochastics are in their own component of the Hamiltonian.
-        return logp_gradient_of_set(self.stochastics, self.nongaussian_markov_blanket)
+        # FIXME: Don't do all these set calls here.
+        # FIXME: Use markov_blanket somehow, not markov_blanket_no_f. Maybe hand-wrap.
+        return pm.utils.logp_gradient_of_set(set(self.stochastics), set(self.markov_blanket_no_f)-set(self.gaussian_stochastics))
 
     @property
     def gradients_vector(self):
@@ -109,51 +122,57 @@ class HMCStep(MultiStep, pm.Metropolis):
 
         return grad_logp
     
-    def scale(self,v,A,inv,uplo):
+    def scale(self,v,A,inv,transa):
+        if self.gaussian_dimensions==0:
+            return
         if inv:
             op=pm.flib.dtrsm_wrap
         else:
             op=pm.flib.dtrmm_wrap
         for s in self.gaussian_stochastics:
-            op(A[s], v[self.slices[s]], uplo=uplo)
+            op(A[s], v[self.slices[s.__name__]], side='L', transa=transa, uplo='L', alpha=1.)
         
     def init_momentum(self):
         # momentum scale proportional to inverse of parameter scale (basically sqrt(covariance))
         # Momentums corresponding to Gaussian parameters are understood to be scaled.
-        L,U = self.get_L_U()
+        L = self.get_L()
         p = np.empty(self.dimensions)
         p_nongaussian = np.random.normal(size=self.nongaussian_dimensions)
         p_gaussian = np.random.normal(size=self.gaussian_dimensions)
         # Compute kinetic energy before scaling momentum.
         ke = self.kenergy(p_nongaussian, p_gaussian)
-        pm.flib.dtrsm_wrap(self.nongaussian_cholesky_u, p_nongaussian, uplo='U')
+        if self.nongaussian_dimensions>0:
+            pm.flib.dtrsm_wrap(self.nongaussian_cholesky, p_nongaussian, transa='T', side='L', uplo='L', alpha=1.)
         p[self.where_nongaussian] = p_nongaussian
         p[self.where_gaussian] = p_gaussian
-        self.scale(p,U,True,'U')
+        self.scale(p,L,True,'T')
         return p, ke
     
-    def get_L_U(self):
-        L = dict([(s, pm.utils.value(s.parents['sig'])) for s in self.gaussian_stochastics])
-        U = dict([(s, L[s].T.copy('F')) for s in self.gaussian_stochastics])
-        return L,U
+    def get_L(self):
+        return dict([(s, pm.utils.value(s.parents['sig'])) for s in self.gaussian_stochastics])
     
     def gaussian_step(self, p, q, step_size):
-        L,U = self.get_L_U()
-        self.scale(p,U,False,'U')
-        self.scale(q,L,True,'L')
+        L = self.get_L()
+        self.scale(p,L,False,'T')
+        self.scale(q,L,True,'N')
         p_gaussian = p[self.where_gaussian]
         q_gaussian = q[self.where_gaussian]
         r = np.sqrt(p_gaussian**2+q_gaussian**2)
-        theta = np.atan2(p_gaussian, q_gaussian)
+        theta = np.arctan2(p_gaussian, q_gaussian)
         theta = theta + step_size
         p[self.where_gaussian] = r*np.cos(theta)
         q[self.where_gaussian] = r*np.sin(theta)
-        self.scale(p,U,True,'U')
-        self.scale(q,L,False,'L')
+        self.scale(p,L,True,'T')
+        self.scale(q,L,False,'N')
         return p,q
     
+    def p_step(self, p, step_size):
+        if self.nongaussian_dimensions > 0:
+            return p - (step_size) * (-self.gradients_vector)
+        else:
+            return p
     def propose(self):
-        self.record_starting_value_and_logp()
+        self.record_starting_value()
 
         #randomize step size
         step_size = np.random.uniform(self.step_size_min, self.step_size_max)
@@ -162,32 +181,46 @@ class HMCStep(MultiStep, pm.Metropolis):
         p, start_ke = self.init_momentum()
 
         #use the leapfrog method
-        p = p - (step_size/2) * (-self.gradients_vector) # half momentum update
+        p = self.p_step(p,step_size*.5) # half momentum update
 
         for i in range(step_count): 
-            #alternate full variable and momentum updates
-            new_vector = self.vector + step_size * np.dot(self.nongaussian_covariance, p)
             
-            # Need to inter here in case the Gaussians' distributions change.
-            self.consider(new_vector)
+            #alternate full variable and momentum updates
+            new_vector = self.vector
+            if self.nongaussian_dimensions>0:
+                nongaussian_delta = step_size * np.dot(self.nongaussian_covariance, p[self.where_nongaussian])
+                new_vector[self.where_nongaussian] += nongaussian_delta
+            
+                # Need to inter here in case the Gaussians' distributions change.
+                self.consider(new_vector)
             
             # One full update for the scaled Gaussian positions and momentums.
             # Requires four sets of triangular matrix multiplications
-            p,newer_vector = self.gaussian_step(p,new_vector,step_size)
-            self.consider(newer_vector)
+            if self.gaussian_dimensions>0:
+                p,newer_vector = self.gaussian_step(p,new_vector,step_size)
+                self.consider(newer_vector)
+
+            # Make sure you haven't wandered into an illegal state
+            try:
+                self.logp_plus_loglike
+            except pm.ZeroProbability:
+                print 'Encountered illegal state while simulating, returning early.'
+                return
             
             if i != step_count - 1:
                 p = p - step_size * (-self.gradients_vector)
              
-        p = p - (step_size/2) * (-self.gradients_vector)   # do a half step momentum update to finish off
+        p = self.p_step(p,step_size*.5)   # do a half step momentum update to finish off
         
         p = -p 
             
         # Rescale momentum and compute kinetic energy.
-        self.scale(p,U,False,'U')    
+        L=self.get_L()
+        self.scale(p,L,False,'T')    
         p_gaussian = p[self.where_gaussian]
         p_nongaussian = p[self.where_nongaussian]
-        pm.flib.dtrmm_wrap(self.nongaussian_cholesky_u, p_nongaussian, uplo='U')
+        if self.nongaussian_dimensions>0:
+            pm.flib.dtrmm_wrap(self.nongaussian_cholesky, p_nongaussian, side='L', transa='T', uplo='L', alpha=1.)
         ke = self.kenergy(p_nongaussian, p_gaussian)
         
         # This 'Hastings factor' makes the standard formula for Metropolis-Hastings acceptance work.    
@@ -197,7 +230,7 @@ class HMCStep(MultiStep, pm.Metropolis):
         return self._hastings_factor
     
     def kenergy(self, p_nongaussian_s, p_gaussian_s):
-        ke = .5*(np.dot(p_nongaussian_s,p_nongaussian_s)+np.dot(p_gaussian_s,p_gaussian_s))
+        return .5*(np.dot(p_nongaussian_s,p_nongaussian_s)+np.dot(p_gaussian_s,p_gaussian_s))
         
     @staticmethod
     def competence(s):
@@ -205,3 +238,5 @@ class HMCStep(MultiStep, pm.Metropolis):
             if False: # test ability to find gradient 
                 return 2.5
         return 0
+
+GPParentHMCStep = pm.gp.wrap_metropolis_for_gp_parents(HMCStep)

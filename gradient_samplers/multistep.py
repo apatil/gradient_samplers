@@ -57,11 +57,10 @@ class MultiStep(pm.StepMethod):
 
         return grad_logp
     
-    def record_starting_value_and_logp(self):
+    def record_starting_value(self):
         self.starting_value = {}
         for stochastic in self.stochastics:
             self.starting_value[stochastic] = stochastic.value
-        self.startig_logp_plus_loglike = self.logp_plus_loglike
          
     def revert(self):
         for stochastic in self.stochastics:
