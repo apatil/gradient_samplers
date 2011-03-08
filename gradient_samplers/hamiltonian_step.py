@@ -60,7 +60,7 @@ class HMCStep(multistep.MultiStep, pm.Metropolis):
     optimal_acceptance = .651 #Beskos 2010
     _tuning_info = ['acceptr']
     
-    def __init__(self, stochastics, step_size_scaling = .25, trajectory_length = None, verbose = 0, tally = True, masses = None, keep_history=False, check_validity_each_timestep):
+    def __init__(self, stochastics, step_size_scaling = .25, trajectory_length = None, verbose = 0, tally = True, masses = None, keep_history=False, check_validity_each_timestep=False):
         multistep.MultiStep.__init__(self, stochastics, verbose, tally)
         
         self.adaptive_scale_factor = 1
@@ -241,6 +241,9 @@ class HMCStep(multistep.MultiStep, pm.Metropolis):
         
         # This 'Hastings factor' makes the standard formula for Metropolis-Hastings acceptance work.    
         self._hastings_factor = start_ke - ke
+    
+    def tune(self, *args, **kwds):
+        return pm.Metropolis.tune(self, *args, **kwds)
     
     def reject(self):
         # print list(self.stochastics)[0].value
