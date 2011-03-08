@@ -60,9 +60,14 @@ class HMCStep(multistep.MultiStep, pm.Metropolis):
     optimal_acceptance = .651 #Beskos 2010
     _tuning_info = ['acceptr']
     
-    def __init__(self, stochastics, step_size_scaling = .25, trajectory_length = 2., verbose = 0, tally = True, masses = None):
+    def __init__(self, stochastics, step_size_scaling = .25, trajectory_length = None, verbose = 0, tally = True, masses = None, keep_history=False, check_validity_each_timestep):
         multistep.MultiStep.__init__(self, stochastics, verbose, tally)
         
+        self.adaptive_scale_factor = 1
+        self.accepted = 0
+        self.rejected = 0
+        self.keep_history = keep_history
+        self.check_validity_each_timestep = check_validity_each_timestep
         
         self._id = 'HMC'
         self.proposal_distribution='None'
@@ -97,7 +102,7 @@ class HMCStep(multistep.MultiStep, pm.Metropolis):
         else :
             self.step_size_max = self.step_size_min = step_size 
         
-        self.trajectory_length = trajectory_length   
+        self.trajectory_length = trajectory_length or step_size*10
         self.zero = np.zeros(self.dimensions)
         
         self.acceptr = 0.
@@ -155,66 +160,74 @@ class HMCStep(multistep.MultiStep, pm.Metropolis):
         L = self.get_L()
         self.scale(p,L,False,'T')
         self.scale(q,L,True,'N')
+        # print self.logp_plus_loglike, self.kenergy(p, [])-self.logp_plus_loglike
         p_gaussian = p[self.where_gaussian]
         q_gaussian = q[self.where_gaussian]
         r = np.sqrt(p_gaussian**2+q_gaussian**2)
         theta = np.arctan2(p_gaussian, q_gaussian)
         theta = theta + step_size
-        p[self.where_gaussian] = r*np.cos(theta)
-        q[self.where_gaussian] = r*np.sin(theta)
-        self.scale(p,L,True,'T')
+        p[self.where_gaussian] = r*np.sin(theta)
+        q[self.where_gaussian] = r*np.cos(theta)
         self.scale(q,L,False,'N')
+        self.consider(q)
+        # print self.logp_plus_loglike, self.kenergy(p,[])-self.logp_plus_loglike
+        self.scale(p,L,True,'T')
+
         return p,q
     
     def p_step(self, p, step_size):
-        if self.nongaussian_dimensions > 0:
-            return p - (step_size) * (-self.gradients_vector)
-        else:
-            return p
-    
+        # from IPython.Debugger import Pdb
+        # Pdb(color_scheme='Linux').set_trace()   
+        return p - (step_size) * (-self.gradients_vector)
+        
+    def q_step(self, q, step_size):
+        nongaussian_delta = step_size * np.dot(self.nongaussian_covariance, p[self.where_nongaussian])
+        q[self.where_nongaussian] += nongaussian_delta
+        self.consider(q)
+        return q
+        
     def propose(self):
         self.record_starting_value()
+        if self.keep_history:
+            self.history = []
 
         #randomize step size
-        step_size = np.random.uniform(self.step_size_min, self.step_size_max)
+        step_size = np.random.uniform(self.step_size_min, self.step_size_max)*self.adaptive_scale_factor
         step_count = int(np.floor(self.trajectory_length / step_size))
 
         p, start_ke = self.init_momentum()
 
-        #use the leapfrog method
+        # #use the leapfrog method
         p = self.p_step(p,step_size*.5) # half momentum update
 
-        for i in range(step_count): 
+        for i in range(step_count):
             
             #alternate full variable and momentum updates
-            new_vector = self.vector
             if self.nongaussian_dimensions>0:
-                nongaussian_delta = step_size * np.dot(self.nongaussian_covariance, p[self.where_nongaussian])
-                new_vector[self.where_nongaussian] += nongaussian_delta
-            
-                # Need to inter here in case the Gaussians' distributions change.
-                self.consider(new_vector)
+                new_vector = self.q_step(self.vector, step_size)
+            else:
+                new_vector = self.vector
             
             # One full update for the scaled Gaussian positions and momentums.
             # Requires four sets of triangular matrix multiplications
             if self.gaussian_dimensions>0:
                 p,newer_vector = self.gaussian_step(p,new_vector,step_size)
-                self.consider(newer_vector)
 
-            # Make sure you haven't wandered into an illegal state
-            try:
-                self.logp_plus_loglike
-            except pm.ZeroProbability:
-                from IPython.Debugger import Pdb
-                Pdb(color_scheme='Linux').set_trace()   
-                print 'Encountered illegal state while simulating, returning early.'
-                return
+            if self.check_validity_each_timestep:
+                # Make sure you haven't wandered into an illegal state
+                try:
+                    self.logp_plus_loglike
+                except pm.ZeroProbability:
+                    print 'Encountered illegal state while simulating, returning early.'
+                    return
             
-            if i != step_count - 1:
-                p = p - step_size * (-self.gradients_vector)
-             
-        p = self.p_step(p,step_size*.5)   # do a half step momentum update to finish off
+            # if i != step_count - 1:
+                p = self.p_step(p, step_size)
+            
+            if self.keep_history:
+                self.history.append(newer_vector)
         
+        p = self.p_step(p,step_size*.5)   # do a half step momentum update to finish off
         p = -p 
             
         # Rescale momentum and compute kinetic energy.
@@ -228,6 +241,13 @@ class HMCStep(multistep.MultiStep, pm.Metropolis):
         
         # This 'Hastings factor' makes the standard formula for Metropolis-Hastings acceptance work.    
         self._hastings_factor = start_ke - ke
+    
+    def reject(self):
+        # print list(self.stochastics)[0].value
+        # print self.starting_value[list(self.stochastics)[0]]
+        # from IPython.Debugger import Pdb
+        # Pdb(color_scheme='Linux').set_trace()   
+        self.revert()
         
     def hastings_factor(self):
         return self._hastings_factor
