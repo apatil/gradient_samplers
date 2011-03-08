@@ -160,7 +160,6 @@ class HMCStep(multistep.MultiStep, pm.Metropolis):
         L = self.get_L()
         self.scale(p,L,False,'T')
         self.scale(q,L,True,'N')
-        # print self.logp_plus_loglike, self.kenergy(p, [])-self.logp_plus_loglike
         p_gaussian = p[self.where_gaussian]
         q_gaussian = q[self.where_gaussian]
         r = np.sqrt(p_gaussian**2+q_gaussian**2)
@@ -170,14 +169,11 @@ class HMCStep(multistep.MultiStep, pm.Metropolis):
         q[self.where_gaussian] = r*np.cos(theta)
         self.scale(q,L,False,'N')
         self.consider(q)
-        # print self.logp_plus_loglike, self.kenergy(p,[])-self.logp_plus_loglike
         self.scale(p,L,True,'T')
 
         return p,q
     
     def p_step(self, p, step_size):
-        # from IPython.Debugger import Pdb
-        # Pdb(color_scheme='Linux').set_trace()   
         return p - (step_size) * (-self.gradients_vector)
         
     def q_step(self, q, step_size):
@@ -246,10 +242,6 @@ class HMCStep(multistep.MultiStep, pm.Metropolis):
         return pm.Metropolis.tune(self, *args, **kwds)
     
     def reject(self):
-        # print list(self.stochastics)[0].value
-        # print self.starting_value[list(self.stochastics)[0]]
-        # from IPython.Debugger import Pdb
-        # Pdb(color_scheme='Linux').set_trace()   
         self.revert()
         
     def hastings_factor(self):
